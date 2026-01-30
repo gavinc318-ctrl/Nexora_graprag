@@ -1,0 +1,19 @@
+services:
+  ocr:
+    image: paddle_ocr_service:0.0.1
+    container_name: paddle_ocr_service
+    ports:
+      - "18000:8000"
+    environment:
+      USE_GPU: "0"
+    restart: unless-stopped
+    volumes:
+      - ./paddle_cache:/root/.paddleocr
+      - ./paddlex_cache:/root/.paddlex
+    command: >
+      gunicorn ocr_service:app
+      -k uvicorn.workers.UvicornWorker
+      -w 8
+      -b 0.0.0.0:8000
+      --timeout 300
+

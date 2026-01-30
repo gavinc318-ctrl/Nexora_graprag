@@ -1,0 +1,27 @@
+services:
+  ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: paddle_ocr_service:gpu_cuda12
+    container_name: paddle_ocr_service_gpu_cuda12
+    ports:
+      - "18001:8000"
+    environment:
+      USE_GPU: "1"
+      NVIDIA_VISIBLE_DEVICES: "all"
+    restart: unless-stopped
+    volumes:
+      - ./paddle_cache:/root/.paddleocr
+      - ./paddlex_cache:/root/.paddlex
+    command: >
+      gunicorn ocr_service:app
+      -k uvicorn.workers.UvicornWorker
+      -w 4
+      -b 0.0.0.0:8000
+      --timeout 300
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

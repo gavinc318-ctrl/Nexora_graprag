@@ -1,0 +1,23 @@
+# GPU OCR Service (CUDA 12.x compatible)
+# Note: Host CUDA 12.4 driver is backward-compatible with CUDA 12.1 runtime
+FROM paddlepaddle/paddle:3.2.2-gpu-cuda11.8-cudnn8.9
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    libxml2 \
+    libxslt1.1 \
+    build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.base.txt /app/requirements.base.txt
+RUN python -m pip install --no-cache-dir -r /app/requirements.base.txt
+
+COPY ocr_service.py /app/ocr_service.py
+
+EXPOSE 8000
+
+CMD ["uvicorn", "ocr_service:app", "--host", "0.0.0.0", "--port", "8000"]

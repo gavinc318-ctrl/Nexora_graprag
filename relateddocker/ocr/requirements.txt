@@ -1,0 +1,22 @@
+# Web framework
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+gunicorn==20.1.0
+
+# Paddle core
+paddlepaddle==3.2.2
+
+# OCR / Document pipeline
+paddleocr==3.3.2
+paddlex[ocr]==3.3.12
+
+# Image & numeric
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+
+# File upload
+python-multipart==0.0.9
+
+# HTML / XML parsing (table extraction)
+beautifulsoup4==4.12.3
+lxml==5.1.0

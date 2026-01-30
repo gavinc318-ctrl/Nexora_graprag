@@ -1,0 +1,32 @@
+services:
+  vllm:
+    image: local/vllm-openai:0.11-cu128
+    container_name: vllm-qwen3-vl
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - /home/usr/models:/models:ro
+    environment:
+      - HF_HOME=/tmp/hf
+      - HF_HUB_DISABLE_TELEMETRY=1
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      # Pin the container to the 3090 only (host GPU 0)
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=0
+    command:
+      - --model=/models/Qwen3-VL-8B-Instruct
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=1
+      - --gpu-memory-utilization=0.85
+      - --max-model-len=8192
+      - --limit-mm-per-prompt
+      - '{"image": 1}'
+      - --mm-processor-kwargs
+      - '{"max_pixels": 2359296, "min_pixels": 262144}'
+    # Compose GPU device pinning (works with Docker Compose v2)
+    gpus:
+      - driver: nvidia
+        device_ids: ["0"]
+        capabilities: ["gpu"]

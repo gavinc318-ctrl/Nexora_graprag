@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    image: graphrag-api:latest
+    container_name: graphrag_app
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "19000:19000"
+      - "17860:7860"
+      - "17861:17861"
+      - "17862:7862"

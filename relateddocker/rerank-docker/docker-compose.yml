@@ -1,0 +1,21 @@
+services:
+  rerank:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rerank-cpu:0.1
+    container_name: rerank-cpu
+
+    # ⚠️ vLLM 已占 8000，这里对外用 8010
+    ports:
+      - "8010:8000"
+
+    environment:
+      - HF_HOME=/cache/hf
+      - TRANSFORMERS_CACHE=/cache/hf
+      - SENTENCE_TRANSFORMERS_HOME=/cache/sbert
+
+    volumes:
+      - ./cache:/cache
+
+    restart: unless-stopped
