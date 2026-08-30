@@ -1,0 +1,24 @@
+# =====================================================================
+# Nexora 授权树骨架（4 个 OU）—— 必需
+# 03-nexora-users.ldif 里的条目挂在 ou=Users 下，所以必须先加载本文件。
+#
+# 远程加载（需 rootDN 密码）：
+#   ldapadd -x -H ldap://ldap.corp.aiis.sa -D "cn=admin,dc=aiis,dc=sa" -W \
+#           -f 02-nexora-tree.ldif
+# =====================================================================
+
+dn: ou=Apps,dc=aiis,dc=sa
+objectClass: organizationalUnit
+ou: Apps
+
+dn: ou=Nexora,ou=Apps,dc=aiis,dc=sa
+objectClass: organizationalUnit
+ou: Nexora
+
+dn: ou=Users,ou=Nexora,ou=Apps,dc=aiis,dc=sa
+objectClass: organizationalUnit
+ou: Users
+
+dn: ou=Groups,ou=Nexora,ou=Apps,dc=aiis,dc=sa
+objectClass: organizationalUnit
+ou: Groups

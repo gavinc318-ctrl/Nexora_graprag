@@ -1,0 +1,23 @@
+# =====================================================================
+# 只读 bind 账号 —— 可选
+#
+# 新库当前允许匿名 bind + 匿名搜索，.env 里 LDAP_BIND_DN/PASSWORD 留空
+# 即可工作。生产环境建议建此账号并关闭匿名访问，然后把 .env 改成：
+#   LDAP_BIND_DN=cn=nexora-bind,dc=aiis,dc=sa
+#   LDAP_BIND_PASSWORD=<明文密码>
+#
+# userPassword 需要 SSHA 哈希，用下面任一方式生成后替换：
+#   slappasswd -s '你的密码'
+#   python3 ../ldap/gen_ssha.py '你的密码'     # 本目录附带，无需 slappasswd
+#
+# 加载：
+#   ldapadd -x -H ldap://ldap.corp.aiis.sa -D "cn=admin,dc=aiis,dc=sa" -W \
+#           -f 04-nexora-bind-account.ldif
+# =====================================================================
+
+dn: cn=nexora-bind,dc=aiis,dc=sa
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: nexora-bind
+description: Read-only bind account for Nexora
+userPassword: {SSHA}REPLACE_WITH_HASH

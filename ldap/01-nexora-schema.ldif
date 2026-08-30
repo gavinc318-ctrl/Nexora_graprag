@@ -1,0 +1,27 @@
+# =====================================================================
+# Nexora 自定义 schema —— 必需，否则 nexoraUser 条目无法创建
+# 从旧库 10.55.223.101 的 cn=Subschema 原样导出，OID 保持一致
+#
+# 执行（需在 LDAP 服务器本机，或有 cn=config 写权限）：
+#   ldapadd -Y EXTERNAL -H ldapi:/// -f 01-nexora-schema.ldif
+# 验证：
+#   ldapsearch -Y EXTERNAL -H ldapi:/// -b cn=schema,cn=config "cn=*nexora*" dn
+# =====================================================================
+dn: cn=nexora,cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: nexora
+olcAttributeTypes: ( 1.3.6.1.4.1.99999.1.1 NAME 'aiisClearance' DESC 'User sec
+ urity clearance level (0-3)' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstr
+ ingsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+olcAttributeTypes: ( 1.3.6.1.4.1.99999.1.2 NAME 'nexoraPersonDN' DESC 'DN of c
+ orresponding entry in ou=People' EQUALITY distinguishedNameMatch SYNTAX 1.3.6
+ .1.4.1.1466.115.121.1.12 SINGLE-VALUE )
+olcAttributeTypes: ( 1.3.6.1.4.1.99999.1.3 NAME 'nexoraRole' DESC 'Nexora role
+  or policy tag' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYN
+ TAX 1.3.6.1.4.1.1466.115.121.1.15 )
+olcAttributeTypes: ( 1.3.6.1.4.1.99999.1.4 NAME 'nexoraStatus' DESC 'Nexora ac
+ count status' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTA
+ X 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+olcObjectClasses: ( 1.3.6.1.4.1.99999.2.1 NAME 'nexoraUser' DESC 'Per-applicat
+ ion user info for Nexora' SUP top STRUCTURAL MUST uid MAY ( aiisClearance $ n
+ exoraPersonDN $ nexoraRole $ nexoraStatus ) )

@@ -1,0 +1,32 @@
+# =====================================================================
+# Nexora 用户授权条目 —— 决定谁能登录、拿到什么密级
+#
+# 关键：登录流程第 3 步在 ou=Users,ou=Nexora,ou=Apps 下按 uid 查
+# aiisClearance。这里没有条目的用户，即使 ou=People 里密码正确，
+# 也会被拒绝并返回 "No clearance assigned to this user"。
+#
+# aiisClearance 含义（与 PG 的 RLS classification 对应）：
+#   0=Public  1=Internal  2=Sensitive  3=Confidential
+# 只能看到 classification <= 自己 clearance 的文档。
+#
+# 执行：
+#   ldapadd -x -D "cn=admin,dc=aiis,dc=sa" -W -H ldap://ldap.corp.aiis.sa \
+#           -f 03-nexora-users.ldif
+#
+# 新库 ou=People 现有用户：gcheng、gzhang（共 2 人）
+# 每新增一个能登录 Nexora 的人，就在这里加一条。
+# =====================================================================
+
+dn: uid=gcheng,ou=Users,ou=Nexora,ou=Apps,dc=aiis,dc=sa
+objectClass: nexoraUser
+uid: gcheng
+aiisClearance: 3
+nexoraStatus: active
+nexoraRole: admin
+
+dn: uid=gzhang,ou=Users,ou=Nexora,ou=Apps,dc=aiis,dc=sa
+objectClass: nexoraUser
+uid: gzhang
+aiisClearance: 2
+nexoraStatus: active
+nexoraRole: user
