@@ -41,12 +41,19 @@ CHAT_COMPLETIONS_URL = _env_str("CHAT_COMPLETIONS_URL", f"{VLLM_BASE_URL}/v1/cha
 MODEL_PATH = _env_str("MODEL_PATH", "/models/Qwen3-VL-8B-Instruct")
 VLM_PROVIDER = _env_str("VLM_PROVIDER", "vllm")  # vllm | openai
 
+# 推理型模型（Qwen3.x 等）默认开 thinking：答案走 reasoning 字段、content 为 None，
+# 且思考过程会吃光 token 预算。置 false 时请求里会带
+# chat_template_kwargs={"enable_thinking": false}。非推理模型忽略该参数。
+VLLM_ENABLE_THINKING = _env_bool("VLLM_ENABLE_THINKING", False)
+
 # OpenAI Responses API (if VLM_PROVIDER == "openai")
 OPENAI_API_KEY = _env_str("OPENAI_API_KEY", "")
 OPENAI_RESPONSES_URL = _env_str("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")
 OPENAI_MODEL = _env_str("OPENAI_MODEL", "gpt-5")
 
-MAX_PDF_CONTEXT_CHARS = 8000
+# 注入 prompt 的检索上下文上限。与 MAX_TOKENS 之和必须留在模型 max_model_len 之内，
+# 否则 vLLM 会直接拒绝请求。中文约 1 字符≈0.7 token。
+MAX_PDF_CONTEXT_CHARS = _env_int("MAX_PDF_CONTEXT_CHARS", 8000)
 PDF_CHUNK_SIZE = 4000
 PDF_CHUNK_OVERLAP = 200
 

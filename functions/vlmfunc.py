@@ -26,10 +26,34 @@ def call_vllm_chat(
         "max_tokens": max_tokens,
         "stream": False,
     }
+
+    # 推理型模型（如 Qwen3.x）默认开启 thinking：全部输出走 reasoning 字段，
+    # message.content 返回 None，且思考过程会吃光 token 预算。
+    # 关闭后模型直接产出答案。非推理模型忽略该参数。
+    if not getattr(config, "VLLM_ENABLE_THINKING", False):
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+
     resp = requests.post(config.CHAT_COMPLETIONS_URL, json=payload, timeout=config.TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
-    return data["choices"][0]["message"]["content"]
+
+    msg = data["choices"][0]["message"]
+    content = msg.get("content")
+    if content:
+        return content
+
+    # 兜底：thinking 仍被开启（或服务端忽略了开关）时，答案落在 reasoning 字段
+    reasoning = msg.get("reasoning") or msg.get("reasoning_content")
+    if reasoning:
+        return reasoning
+
+    finish = data["choices"][0].get("finish_reason")
+    if finish == "length":
+        raise RuntimeError(
+            f"模型未产出内容：max_tokens={max_tokens} 已耗尽（finish_reason=length）。"
+            "若模型为推理型，请确认 VLLM_ENABLE_THINKING=false，或调大 MAX_TOKENS。"
+        )
+    raise RuntimeError(f"模型返回空内容 (finish_reason={finish})")
 
 def call_openai_responses_json(
     page_png_data_url: str,

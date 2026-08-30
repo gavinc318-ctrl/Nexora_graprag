@@ -62,6 +62,27 @@ def _ingest_key(job_id: str) -> str:
     return f"{INGEST_KEY_PREFIX}{job_id}"
 
 
+def _safe_upload_name(filename: Optional[str]) -> str:
+    """把客户端传来的文件名净化成可安全落盘的名字。
+
+    core.ingest_file 用 Path(file_path).stem 拼 doc_dir（doc_dir = "<stem>_<uuid>"），
+    而 doc_dir 会成为 MinIO 的 object key 前缀，所以这里必须去掉路径分隔符与
+    控制字符，否则会产生越权路径或非法 key。
+    """
+    name = os.path.basename((filename or "").strip().replace("\\", "/"))
+    name = name.replace("\x00", "")
+    # 仅剔除路径分隔与控制字符，保留中文/阿拉伯文等 Unicode 文件名
+    name = "".join(ch for ch in name if ch not in '/\\' and ord(ch) >= 32)
+    name = name.strip(". ")                     # 防 "." ".." 及尾随点
+    if not name:
+        return "upload"
+    stem, ext = os.path.splitext(name)
+    if not stem:                                # 形如 ".pdf"
+        stem, ext = "upload", name
+    return stem[:100] + ext[:20]                # doc_dir 还要再拼 36 字符的 uuid
+
+
+
 def state_to_dict(state: AppState) -> Dict[str, Any]:
     return {"api_messages": state.api_messages, "ui_messages": state.ui_messages}
 
@@ -174,9 +195,9 @@ async def _run_ingest_job(
             "finished_at": int(time.time()),
         }
     finally:
-        # 删除临时文件
+        # 删除临时文件所在的整个目录
         try:
-            os.remove(tmp_path)
+            shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
         except Exception:
             pass
 
@@ -534,10 +555,13 @@ async def api_ingest_file(
     r: redis.Redis = request.app.state.redis
     
     # 保存上传的文件到临时目录
-    suffix = os.path.splitext(file.filename or "")[1] or ""
     print(f"我收到一个文件请求{file.filename}")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp_path = tmp.name
+    # 注意：不能用 NamedTemporaryFile —— 它只保留扩展名，文件名会变成 tmpXXXXXXXX，
+    # 导致 core.ingest_file 生成的 doc_dir 成了 "tmpXXXXXXXX_<uuid>" 而非原文件名。
+    # 改为在独立临时目录内用原始文件名落盘，目录在任务结束时整体删除。
+    tmp_dir = tempfile.mkdtemp(prefix="nexora_ingest_")
+    tmp_path = os.path.join(tmp_dir, _safe_upload_name(file.filename))
+    with open(tmp_path, "wb") as tmp:
         await file.seek(0)
         shutil.copyfileobj(file.file, tmp)
 

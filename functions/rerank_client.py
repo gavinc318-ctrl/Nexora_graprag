@@ -119,6 +119,7 @@ def rerank_hits(query: str, hits: List[Dict[str, Any]], top_k: int) -> List[Dict
     min_score = getattr(config, "RERANK_MIN_SCORE", None)
 
     order: List[int] = []
+    scores_by_index: Dict[int, float] = {}
     used = set()
     for item in results:
         d = item.get("doc")
@@ -132,6 +133,8 @@ def rerank_hits(query: str, hits: List[Dict[str, Any]], top_k: int) -> List[Dict
             if i not in used:
                 used.add(i)
                 order.append(i)
+                if score is not None:
+                    scores_by_index[i] = float(score)
         except ValueError:
             continue
 
@@ -140,8 +143,19 @@ def rerank_hits(query: str, hits: List[Dict[str, Any]], top_k: int) -> List[Dict
         for i in range(len(docs)):
             if i not in used:
                 order.append(i)
-    elif not order:
-        # 阈值过高导致无命中时，回退原始顺序避免空结果
-        order = list(range(len(docs)))
 
-    return [hits[i] for i in order if 0 <= i < len(hits)]
+    # 注意：设置了 min_score 且全部候选都低于阈值时，这里【必须返回空】。
+    # 曾经的实现会 order = list(range(len(docs))) 回退成全量返回，
+    # 使阈值形同虚设——像 "hello" 这种与语料完全无关的输入
+    # （rerank 得分 0.000）也会被塞进 LLM 上下文，诱发幻觉。
+    # 返回空后 chat_send 不注入 pdf_context，模型即正常对话。
+
+    out: List[Dict[str, Any]] = []
+    for i in order:
+        if not (0 <= i < len(hits)):
+            continue
+        h = dict(hits[i])
+        if i in scores_by_index:
+            h["rerank_score"] = scores_by_index[i]
+        out.append(h)
+    return out

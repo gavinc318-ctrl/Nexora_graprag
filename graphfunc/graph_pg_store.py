@@ -3,8 +3,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import json
 import psycopg
 import config
+
+
+def _jsonb(value: Any) -> str:
+    """序列化为 jsonb 字面量。
+
+    psycopg3 会把 Python list 适配成 PostgreSQL 数组字面量 '{a,b}'，
+    再 ::jsonb 转换就会报 invalid input syntax for type json；dict 则直接无适配器。
+    所有绑到 %s::jsonb 的参数都必须先经过这里。
+    """
+    return json.dumps(value if value is not None else [], ensure_ascii=False)
 
 
 @dataclass(frozen=True)
@@ -105,7 +116,7 @@ class GraphPgStore:
                         updated_by = current_user
                     RETURNING entity_id, name, type, confidence, occurrence_count, is_active;
                     """,
-                    (ctx.app_id, name, entity_type, aliases, description, confidence, classification, emb_literal),
+                    (ctx.app_id, name, entity_type, _jsonb(aliases), description, confidence, classification, emb_literal),
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -197,7 +208,7 @@ class GraphPgStore:
             vals.append(entity_type)
         if aliases is not None:
             sets.append("aliases = %s::jsonb")
-            vals.append(aliases)
+            vals.append(_jsonb(aliases))
         if confidence is not None:
             sets.append("confidence = %s")
             vals.append(confidence)
@@ -332,7 +343,7 @@ class GraphPgStore:
                         weight,
                         confidence,
                         classification,
-                        evidence_chunk_ids,
+                        _jsonb(evidence_chunk_ids),
                         edge_notes,
                     ),
                 )
@@ -400,7 +411,7 @@ class GraphPgStore:
             vals.append(confidence)
         if evidence_chunk_ids is not None:
             sets.append("evidence_chunk_ids = %s::jsonb")
-            vals.append(evidence_chunk_ids)
+            vals.append(_jsonb(evidence_chunk_ids))
         if edge_notes is not None:
             sets.append("edge_notes = %s")
             vals.append(edge_notes)
@@ -728,7 +739,7 @@ class GraphPgStore:
                         entity_id,
                         summary_text,
                         summary_type,
-                        anchor_chunk_ids,
+                        _jsonb(anchor_chunk_ids),
                         confidence,
                         classification,
                     ),
@@ -853,7 +864,7 @@ class GraphPgStore:
                     INSERT INTO graph_job(app_id, job_type, payload, status)
                     VALUES (%s, %s, %s::jsonb, 'pending');
                     """,
-                    (ctx.app_id, job_type, payload),
+                    (ctx.app_id, job_type, _jsonb(payload)),
                 )
             conn.commit()
 
