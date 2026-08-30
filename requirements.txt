@@ -47,15 +47,16 @@ modelscope==1.33.0
 more-itertools==10.8.0
 networkx==3.6.1
 numpy==2.2.6
+# 注意：paddlex[ocr] 硬性要求非 headless 的 opencv-contrib-python==4.10.0.84
+# 它需要 libGL.so.1；无 root 环境可用 conda-forge 的 libgl 包提供
 opencv-contrib-python==4.10.0.84
-opencv-python==4.12.0.88
 openpyxl==3.1.5
 opt-einsum==3.3.0
 orjson==3.11.5
 packaging==25.0
 paddleocr==3.3.2
 paddlepaddle==3.2.2
-paddlex==3.3.12
+paddlex[ocr]==3.3.12
 pandas==2.3.3
 pillow==12.0.0
 premailer==3.10.0
@@ -78,7 +79,8 @@ pypdfium2==5.2.0
 python-bidi==0.6.7
 python-dateutil==2.9.0.post0
 python-multipart==0.0.21
-python-ldap==3.4.4
+# python-ldap 由 conda-forge 提供（系统缺 ldap.h 无法编译）
+# python-ldap==3.4.4
 pytz==2025.2
 PyYAML==6.0.2
 regex==2025.11.3
@@ -113,3 +115,5 @@ ujson==5.11.0
 urllib3==2.6.2
 uvicorn==0.40.0
 wcwidth==0.2.14
+python-docx==1.1.2
+python-dotenv==1.0.1
