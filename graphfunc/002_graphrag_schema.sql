@@ -56,13 +56,14 @@ CREATE TABLE IF NOT EXISTS chunks (
   chunk_text      text NOT NULL,
   chunk_hash      text NOT NULL,
   
-  embedding       vector(1536),          -- 向量维度（根据实际调整）
+  embedding       vector(1024),          -- 向量维度：必须与 config.EMBED_DIM 一致（qwen3-embedding:0.6b = 1024）
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_chunks_app_class ON chunks(app_id, classification);
 CREATE INDEX idx_chunks_doc_ver ON chunks(doc_id, version_id);
 CREATE INDEX idx_chunks_created_at ON chunks(app_id, created_at DESC);
+CREATE INDEX idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
 
 \echo '✅ 表 chunks 已创建'
 
@@ -128,7 +129,8 @@ CREATE TABLE IF NOT EXISTS entity (
   created_by         text DEFAULT current_user,
   updated_at         timestamptz NOT NULL DEFAULT now(),
   updated_by         text DEFAULT current_user,
-  
+  embedding          vector(1024),          -- 实体向量：hybrid 召回用，维度同 chunks
+
   UNIQUE(app_id, name, type, classification)
 );
 
@@ -138,6 +140,7 @@ CREATE INDEX idx_entity_type ON entity(app_id, type);
 CREATE INDEX idx_entity_confidence ON entity(app_id, confidence);
 CREATE INDEX idx_entity_occurrence ON entity(app_id, occurrence_count DESC);
 CREATE INDEX idx_entity_created_at ON entity(app_id, created_at DESC);
+CREATE INDEX idx_entity_embedding ON entity USING hnsw (embedding vector_cosine_ops);
 
 \echo '✅ 表 entity 已创建'
 
