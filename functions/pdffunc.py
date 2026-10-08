@@ -32,7 +32,7 @@ def render_page_png_data_url(page: fitz.Page, target_long_edge: int = 1280) -> s
     base_w, base_h = rect.width, rect.height
     # zoom 后的像素大致与 points 成比例
     zoom = target_long_edge / max(base_w, base_h)
-    zoom = max(0.8, min(zoom, 2.0))  # 给个合理范围
+    zoom = max(0.8, min(zoom, 3.0))  # 给个合理范围（高分屏截图利于阿拉伯语识别）
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat, alpha=False)
     return _pixmap_to_png_data_url(pix)
@@ -401,11 +401,18 @@ def extract_pdf_multimodal_rag(
 
             pages.append(
                 {
-                    "page_no": page_no,          # 用真实页号
-                    "text": page_texts,        
-                    "tables": page_tables,    
-                    "figures": None,
-                    "png_bytes": r.get("png"),   # 如需预览图，后面再加（或复用你已有的 OCR png）
+                    "page_no": page_no,
+                    "text": page_texts,
+                    "tables": page_tables,
+                    "figures": "",
+                    "png_bytes": r.get("png"),
+                    "ocr_text": page_texts,
+                    "ocr_tables": page_tables,
+                    "ocr_log": r.get("logs") or "",
+                    "vlm_text": "",
+                    "vlm_tables": "",
+                    "vlm_figures": "",
+                    "vlm_error": "",
                 }
             )
 
@@ -422,6 +429,10 @@ def extract_pdf_multimodal_rag(
         page = doc.load_page(i)
         page_no = i + 1
         combined_hint_parts: List[str] = []
+        ocr_text = ""
+        ocr_tables: List[Dict[str, Any]] = []
+        ocr_logs = ""
+        table_blob = ""
         #生成当前页的快照，用于保存证据和OCR识别
         png_bytes = render_page_png_bytes(page, zoom=2.0)
 
@@ -432,6 +443,19 @@ def extract_pdf_multimodal_rag(
             combined_hint_parts.append("PDF TextLayer (Plain Text):\n" + textlayer_plain.strip())
         if textlayer_md.strip():
             combined_hint_parts.append("PDF TextLayer (Markdown):\n" + textlayer_md.strip())
+
+        if not use_ocr and not use_vlm:
+            plain_text = textlayer_plain.strip() or textlayer_md.strip()
+            pages.append(
+                {
+                    "page_no": page_no,
+                    "text": plain_text,
+                    "tables": "",
+                    "figures": "",
+                    "png_bytes": png_bytes,
+                }
+            )
+            continue
 
         # ---- pdf ocr抽取----
         if use_ocr:
@@ -457,7 +481,10 @@ def extract_pdf_multimodal_rag(
 
 
         # ✅ 生成PDF页面图像
-        page_png_data_url = render_page_png_data_url(page=page, target_long_edge =1280)
+        _long_edge = 1280
+        if (getattr(config, "VLM_PROVIDER", "vllm") or "vllm").lower() == "openai":
+            _long_edge = getattr(config, "OPENAI_VLM_IMAGE_LONG_EDGE", 1600)
+        page_png_data_url = render_page_png_data_url(page=page, target_long_edge=_long_edge)
 
         vlm_payload = vlm_page_to_rag_jason(
                         page_png_data_url=page_png_data_url,
@@ -468,13 +495,21 @@ def extract_pdf_multimodal_rag(
         vlm_text = (vlm_payload.get("text") or "").strip()
         vlm_tables = vlm_tables_to_markdown(vlm_payload.get("tables") or [])
         vlm_figures = vlm_figures_to_markdown(vlm_payload.get("figures") or [])
+        vlm_error = (vlm_payload.get("error") or "").strip()
         pages.append(
             {
-                "page_no": page_no,       # 用真实页号
-                "text": vlm_text,        # vlm 返回
-                "tables": vlm_tables,    # vlm不单独返回表格
+                "page_no": page_no,
+                "text": vlm_text or (ocr_text or "").strip(),
+                "tables": vlm_tables or (table_blob or "").strip(),
                 "figures": vlm_figures,
-                "png_bytes": png_bytes,        # 如需预览图，后面再加（或复用你已有的 OCR png）
+                "png_bytes": png_bytes,
+                "ocr_text": (ocr_text or "").strip(),
+                "ocr_tables": (table_blob or "").strip(),
+                "ocr_log": ocr_logs,
+                "vlm_text": vlm_text,
+                "vlm_tables": vlm_tables,
+                "vlm_figures": vlm_figures,
+                "vlm_error": vlm_error,
             }
         )
     doc.close()

@@ -36,6 +36,7 @@ from core import (
     clear_db,
     ingest_file,
     load_ocr_page_assets,
+    load_vlm_page_assets,
     load_page_chunks_for_review,
     pg_store,
     RlsContext,
@@ -714,8 +715,126 @@ async def api_clear_db(rag_app_id: str = Body(..., embed=True)):
 
 
 # =========================
+# Odoo 企业数据问答（AI Agent，只读）
+# =========================
+
+class OdooAskIn(BaseModel):
+    question: str
+    session_id: Optional[str] = None
+    history: Optional[List[Dict[str, str]]] = None
+    department: str = "hr"
+
+
+@app.post("/v1/odoo/ask")
+async def api_odoo_ask(payload: OdooAskIn = Body(...), request: Request = None):
+    """向 Odoo 某个业务部门提问（department 默认 hr）。工具调用循环在线程池里跑（内含同步 XML-RPC/HTTP）。
+    可用部门列表见 GET /v1/odoo/departments；新增部门只需要在
+    functions/odoo_skill/departments/ 下加一个模块，这里不用改。"""
+    from functions.odoo_skill import odoo_ask
+
+    history = payload.history
+    r: Optional[redis.Redis] = getattr(request.app.state, "redis", None) if request else None
+    if history is None and payload.session_id and r is not None:
+        try:
+            st = await load_state(r, payload.session_id)
+            history = [
+                {"role": m.get("role"), "content": m.get("content")}
+                for m in (st.ui_messages or [])
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ][-10:]
+        except Exception:
+            history = None
+
+    res = await asyncio.to_thread(odoo_ask, payload.question, history, payload.department)
+
+    if res.get("ok") and payload.session_id and r is not None:
+        try:
+            st = await load_state(r, payload.session_id)
+            st.ui_messages.append({"role": "user", "content": payload.question})
+            st.ui_messages.append({"role": "assistant", "content": res.get("answer", "")})
+            await save_state(r, payload.session_id, st)
+        except Exception:
+            pass
+
+    if not res.get("ok"):
+        raise HTTPException(status_code=502, detail=res.get("error", "odoo agent failed"))
+    return res
+
+
+@app.get("/v1/odoo/departments")
+async def api_odoo_departments():
+    """列出当前已接入的 Odoo 业务部门（前端 Data Source 下拉框据此动态渲染）。"""
+    from functions.odoo_skill import list_departments
+    return {"ok": True, "departments": list_departments()}
+
+
+@app.get("/v1/odoo/ping")
+async def api_odoo_ping():
+    from functions.odoo_client import get_client, OdooError
+    try:
+        return await asyncio.to_thread(lambda: get_client().ping())
+    except OdooError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# =========================
 # Admin：OCR 资产 & Chunk 校对
 # =========================
+
+
+def _doc_dir_from_source_uri(source_uri: Optional[str], rag_app_id: str) -> str:
+    """从 docs.source_uri 还原真实 doc_dir（=<文件名stem>_<uuid>）。
+
+    source_uri 形如 s3://rag-files/<app_id>/<doc_dir>/source/<doc_dir><ext>。
+    前端「数据管理」里用户常只填原始文件名（如 xxx.pdf），而 MinIO 的对象
+    前缀是 doc_dir（不含扩展名、带 uuid），直接拿用户输入去取会全部 miss
+    （表现为 “Image not available / No text extracted”）。PG 侧靠 ILIKE 模糊
+    匹配能命中，这里就用命中的 source_uri 反推正确的 doc_dir。
+    """
+    if not source_uri:
+        return ""
+    marker = f"/{(rag_app_id or '').strip()}/"
+    s = source_uri
+    if marker in s:
+        s = s.split(marker, 1)[1]
+    else:
+        # 兜底：去掉 scheme://bucket/ 前缀
+        s = s.split("://", 1)[-1]
+        parts = s.split("/", 2)
+        s = parts[2] if len(parts) == 3 else s
+    # s 现在应是 "<doc_dir>/source/<doc_dir><ext>" 或 "<doc_dir>/..."
+    return s.split("/", 1)[0].strip()
+
+
+def _load_page_assets_merged(rag_app_id: str, doc_dir: str, page_no: int) -> Dict[str, Any]:
+    """合并某页的 OCR + VLM 产物。
+
+    入库按解析模式分目录写：OCR 模式写 <doc_dir>/ocr/{text,tab,log}/，
+    VLM 模式写 <doc_dir>/vlm/{text,tab,figure,error}/。旧接口只读 ocr/，
+    导致 VLM-only 入库的文档在“数据管理”里 text/table/figure 全空。
+
+    这里同时读两边：ocr_* 字段按 OCR→VLM 回退，vlm_* 字段单独保留，
+    前端可只用 ocr_*，也可分开展示 OCR / VLM。
+    """
+    ocr = load_ocr_page_assets(rag_app_id, doc_dir, page_no)
+    try:
+        vlm = load_vlm_page_assets(rag_app_id, doc_dir, page_no)
+    except Exception:
+        vlm = {}
+
+    return {
+        "png_bytes": ocr.get("png_bytes") or b"",
+        "ocr_text": ocr.get("ocr_text") or vlm.get("vlm_text") or "",
+        "ocr_table": ocr.get("ocr_table") or vlm.get("vlm_table") or "",
+        "ocr_figure": ocr.get("ocr_figure") or vlm.get("vlm_figure") or "",
+        "ocr_log": ocr.get("ocr_log") or "",
+        "vlm_text": vlm.get("vlm_text") or "",
+        "vlm_table": vlm.get("vlm_table") or "",
+        "vlm_figure": vlm.get("vlm_figure") or "",
+        "vlm_error": vlm.get("vlm_error") or "",
+        "object_keys": ocr.get("object_keys"),
+        "vlm_object_keys": vlm.get("object_keys"),
+    }
 
 
 @app.get("/v1/admin/page_assets")
@@ -724,10 +843,10 @@ async def api_admin_page_assets(
     doc_dir: str,
     page_no: int,
 ):
-    """返回某页 OCR 产物（text/tab/log + png_bytes）。"""
+    """返回某页 OCR + VLM 产物（text/tab/figure/log + png_bytes）。"""
     import base64
 
-    assets = load_ocr_page_assets(rag_app_id, doc_dir, page_no)
+    assets = _load_page_assets_merged(rag_app_id, doc_dir, page_no)
     png = assets.get("png_bytes") or b""
     assets["png_base64"] = base64.b64encode(png).decode("ascii") if png else ""
     assets.pop("png_bytes", None)
@@ -755,12 +874,19 @@ async def api_admin_page_review(
     doc_dir: str,
     page_no: int,
 ):
-    """聚合接口：OCR 产物 + 本页 chunks（按 [[META page=...]] 过滤）。"""
-    assets = load_ocr_page_assets(rag_app_id, doc_dir, page_no)
+    """聚合接口：OCR + VLM 产物 + 本页 chunks（按 [[META page=...]] 过滤）。"""
+    import base64
+
     review = load_page_chunks_for_review(rag_app_id, rag_clearance, doc_dir, page_no)
     if not review.get("ok"):
         raise HTTPException(status_code=404, detail=review.get("error", "not found"))
-    assets.pop("png_bytes", None)
+
+    # 用户常只填原始文件名；用命中文档的 source_uri 反推真实 doc_dir 再取 MinIO 产物
+    real_doc_dir = _doc_dir_from_source_uri(review.get("source_uri"), rag_app_id) or doc_dir
+    assets = _load_page_assets_merged(rag_app_id, real_doc_dir, page_no)
+    assets["doc_dir"] = real_doc_dir
+    png = assets.pop("png_bytes", None) or b""
+    assets["png_base64"] = base64.b64encode(png).decode("ascii") if png else ""
     return {
         "ok": True,
         "assets": assets,

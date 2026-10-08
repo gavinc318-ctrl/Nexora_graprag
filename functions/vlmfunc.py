@@ -18,22 +18,38 @@ def call_vllm_chat(
         top_p:float=config.TOP_P,
         max_tokens:int = config.MAX_TOKENS
         ) -> str:
-    payload = {
-        "model": config.MODEL_PATH,
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": top_p,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
+    provider = (getattr(config, "LLM_PROVIDER", getattr(config, "VLM_PROVIDER", "vllm")) or "vllm").lower()
 
-    # 推理型模型（如 Qwen3.x）默认开启 thinking：全部输出走 reasoning 字段，
-    # message.content 返回 None，且思考过程会吃光 token 预算。
-    # 关闭后模型直接产出答案。非推理模型忽略该参数。
-    if not getattr(config, "VLLM_ENABLE_THINKING", False):
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    if provider == "openai":
+        # OpenAI 官方 Chat Completions：需 Bearer 鉴权，且不认 chat_template_kwargs
+        url = config.OPENAI_CHAT_URL
+        headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
+        payload = {
+            "model": config.OPENAI_MODEL,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+    else:
+        url = config.CHAT_COMPLETIONS_URL
+        headers = {}
+        payload = {
+            "model": config.MODEL_PATH,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        # 推理型模型（如 Qwen3.x）默认开启 thinking：全部输出走 reasoning 字段，
+        # message.content 返回 None，且思考过程会吃光 token 预算。
+        # 关闭后模型直接产出答案。非推理模型忽略该参数。
+        if not getattr(config, "VLLM_ENABLE_THINKING", False):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
-    resp = requests.post(config.CHAT_COMPLETIONS_URL, json=payload, timeout=config.TIMEOUT)
+    resp = requests.post(url, json=payload, headers=headers, timeout=config.TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
 
@@ -55,95 +71,113 @@ def call_vllm_chat(
         )
     raise RuntimeError(f"模型返回空内容 (finish_reason={finish})")
 
+_OPENAI_PAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "caption": {"type": "string"},
+                    "markdown": {"type": "string"},
+                },
+                "required": ["caption", "markdown"],
+                "additionalProperties": False,
+            },
+        },
+        "figures": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "caption": {"type": "string"},
+                    "description": {"type": "string"},
+                    "data_table_markdown": {"type": "string"},
+                },
+                "required": ["caption", "description", "data_table_markdown"],
+                "additionalProperties": False,
+            },
+        },
+        "notes": {"type": "string"},
+    },
+    "required": ["text", "tables", "figures", "notes"],
+    "additionalProperties": False,
+}
+
+
 def call_openai_responses_json(
     page_png_data_url: str,
     lang: str,
     text_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    LANG_MAP = {
-        "ar": "Arabic",
-        "ch": "Chinese",
-        "en": "English"
-    }
+    """
+    用 OpenAI 视觉模型把 PDF 页面截图转成结构化 JSON（文本/表格/图表分离）。
+    走 Chat Completions（/v1/chat/completions）+ image_url + json_schema 结构化输出，
+    比 Responses API 稳。对阿拉伯语整页转写比本地 PaddleOCR + 小 VLM 效果好。
+    """
+    LANG_MAP = {"ar": "Arabic", "ch": "Chinese", "en": "English"}
     lang = LANG_MAP.get(lang, lang)
     prompt = (
-        f"You are reading a screenshot of a PDF page, The page content language is primarily {lang}.\n"
-        "Return a single JSON object that matches the schema.\n"
+        f"You are transcribing a screenshot of a PDF page. The page language is primarily {lang}.\n"
+        "Return ONE JSON object matching the schema.\n"
         "Rules:\n"
-        "- Use the same language as the page content. Do not translate.\n"
-        "- Exclude page numbers, watermarks, and copyrights.\n"
-        "- If you see a two-column list of 'Category + Value', output it as a Markdown table.\n"
-        "- If a section does not exist, use an empty string or empty array.\n"
+        "- Transcribe every visible character faithfully in natural reading order "
+        f"(for {lang}, respect right-to-left order where applicable).\n"
+        "- Keep the original language. Do NOT translate, summarize, or omit content.\n"
+        "- Preserve Arabic diacritics/hamza/tatweel exactly as shown.\n"
+        "- Put running body text in `text`; render every table as Markdown in `tables[].markdown` "
+        "with its caption; describe each figure/chart in `figures[]`.\n"
+        "- If you see a two-column 'Category + Value' list, output it as a Markdown table.\n"
+        "- Exclude page numbers, headers/footers, watermarks and copyright lines.\n"
+        "- If a section has nothing, use an empty string or empty array.\n"
     )
     if text_hint:
         prompt += (
-            "\n\nThe following text is extracted from the PDF text layer and ocr, is only for correction and proper nouns."
-            "Do not copy its line breaks or order; follow the reading order on the screenshot:\n"
+            "\n\nReference text from the PDF text layer / local OCR (may be wrong or mis-ordered). "
+            "Use it ONLY to disambiguate proper nouns and numbers; trust the screenshot for everything else:\n"
             f"{text_hint}\n"
         )
 
     payload = {
-        "model": config.OPENAI_MODEL,
-        "input": [
+        "model": config.OPENAI_VLM_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You convert PDF page screenshots into faithful, structured, retrievable text.",
+            },
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": page_png_data_url},
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": page_png_data_url, "detail": "high"},
+                    },
                 ],
-            }
+            },
         ],
+        "temperature": 0,
+        "max_tokens": config.OPENAI_VLM_MAX_TOKENS,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
                 "name": "rag_page",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "tables": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "caption": {"type": "string"},
-                                    "markdown": {"type": "string"},
-                                },
-                                "required": ["caption", "markdown"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "figures": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "caption": {"type": "string"},
-                                    "description": {"type": "string"},
-                                    "data_table_markdown": {"type": "string"},
-                                },
-                                "required": ["caption", "description", "data_table_markdown"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "notes": {"type": "string"},
-                    },
-                    "required": ["text", "tables", "figures", "notes"],
-                    "additionalProperties": False,
-                },
+                "strict": True,
+                "schema": _OPENAI_PAGE_SCHEMA,
             },
         },
     }
     headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
-    resp = requests.post(config.OPENAI_RESPONSES_URL, json=payload, headers=headers, timeout=config.TIMEOUT)
+    resp = requests.post(config.OPENAI_CHAT_URL, json=payload, headers=headers, timeout=config.TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
-    output = data.get("output") or []
-    for item in output:
-        for content in item.get("content", []):
-            if content.get("type") == "output_text":
-                return json.loads(content.get("text") or "{}")
-    raise ValueError("OpenAI Responses returned no output_text")
+    msg = data["choices"][0]["message"]
+    content = msg.get("content")
+    if not content:
+        raise ValueError(f"OpenAI VLM returned empty content (finish_reason={data['choices'][0].get('finish_reason')})")
+    return json.loads(content)
 
 def vlm_page_to_rag_text_structured(
     page_png_data_url: str,
@@ -206,11 +240,8 @@ def vlm_page_to_rag_text_structured(
             ],
         },
     ]
-    try:
-        raw = call_vllm_chat(messages=messages, temperature=0, top_p=1)
-        return (raw or "").strip()
-    except Exception as e:
-        return f"(VLM Page {page_no} failed: {type(e).__name__}: {e})"
+    raw = call_vllm_chat(messages=messages, temperature=0, top_p=1)
+    return (raw or "").strip()
 
 def parse_vlm_text_to_payload(raw_text: str, page_no: int) -> Dict[str, Any]:
     text_blocks, tables_blocks, figures_blocks = detect_tables_and_figures(raw_text)

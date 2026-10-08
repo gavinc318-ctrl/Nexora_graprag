@@ -1,5 +1,18 @@
 """Gradio 前端（仅 UI），复用 core.py 核心能力"""
 
+import os
+import tempfile
+from pathlib import Path
+
+# The shared /tmp/gradio directory may belong to another OS user. Configure a
+# per-user upload directory before importing Gradio, which reads this variable
+# during module initialization.
+_gradio_temp_dir = os.environ.setdefault(
+    "GRADIO_TEMP_DIR",
+    str(Path(tempfile.gettempdir()) / f"nexora-gradio-{os.getuid()}"),
+)
+Path(_gradio_temp_dir).mkdir(parents=True, exist_ok=True)
+
 import gradio as gr
 import config
 import re
@@ -16,8 +29,11 @@ def _is_arabic_text(text: str) -> bool:
 def _wrap_rtl(text: str) -> str:
     if not text:
         return text
-    # Force RTL direction and right alignment for Arabic replies in Chatbot.
-    return f'<div dir="rtl" style="text-align:right">{text}</div>'
+    return (
+        '<div dir="rtl" lang="ar" '
+        'style="direction:rtl;text-align:right;unicode-bidi:plaintext">'
+        f'{text}</div>'
+    )
 
 
 def _format_ui_messages_for_display(messages):
@@ -27,7 +43,7 @@ def _format_ui_messages_for_display(messages):
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content") or ""
-        if role == "assistant" and _is_arabic_text(content):
+        if role in {"user", "assistant"} and _is_arabic_text(content):
             content = _wrap_rtl(content)
         formatted.append({"role": role, "content": content})
     return formatted
@@ -50,22 +66,35 @@ def on_upload_pdf(
         # gr.File 组件清空必须返回 None（不要返回空字符串，否则会被当成路径去缓存）
         return state, None, gr.update(value="未选择PDF")
 
-    info = ingest_file(
-        file_path=pdf_file.name,
-        parse_modes=parse_modes,
-        chunk_mode=chunk_mode,
-        ocr_lang_choice=ocr_lang_choice,
-        graph_enabled=graph_enabled,
-        graph_prompt_key=graph_prompt_key,
-        rag_app_id=rag_app_id,
-        rag_clearance=rag_clearance,
-    )
+    try:
+        info = ingest_file(
+            file_path=pdf_file.name,
+            parse_modes=parse_modes,
+            chunk_mode=chunk_mode,
+            ocr_lang_choice=ocr_lang_choice,
+            graph_enabled=graph_enabled,
+            graph_prompt_key=graph_prompt_key,
+            rag_app_id=rag_app_id,
+            rag_clearance=rag_clearance,
+        )
+    except Exception as e:
+        return (
+            state,
+            None,
+            gr.update(value=f"处理失败：{type(e).__name__}: {e}"),
+        )
+
+    if not info.get("ok"):
+        return state, None, gr.update(value=f"处理失败：{info.get('error') or '未知错误'}")
 
     msg = (
         f"Doc Name：{info.get('doc_name')} \nObject key={info.get('source_uri')} \n"
         f"Processing Done：Total {info.get('pdf_chars')} chars,Chunking {info.get('chunks')} pieces（pages={info.get('pages')}）\n"
         f"DB：{info.get('db_msg')}"
     )
+    warnings = info.get("processing_warnings") or []
+    if warnings:
+        msg += "\nWarnings：\n- " + "\n- ".join(str(item) for item in warnings)
     # 入库完成后清空上传控件
     return state, None, gr.update(value=msg)
 

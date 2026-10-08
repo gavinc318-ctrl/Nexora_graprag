@@ -67,6 +67,24 @@ def build_ocr_object_keys(rag_app_id: str, doc_dir: str, page_no: int) -> Dict[s
     }
 
 
+def build_vlm_object_keys(rag_app_id: str, doc_dir: str, page_no: int) -> Dict[str, str]:
+    """Build MinIO keys for the raw VLM result of one page."""
+    rag_app_id = (rag_app_id or config.RAG_APP_ID).strip()
+    doc_dir = (doc_dir or "").strip()
+    page_no = int(page_no)
+    if not rag_app_id or not doc_dir or page_no <= 0:
+        raise ValueError("rag_app_id/doc_dir/page_no invalid")
+
+    base = f"{rag_app_id}/{doc_dir}/vlm"
+    file_base = f"{doc_dir}_page{page_no}"
+    return {
+        "text": f"{base}/text/{file_base}.txt",
+        "tab": f"{base}/tab/{file_base}table.txt",
+        "figure": f"{base}/figure/{file_base}figure.txt",
+        "error": f"{base}/error/{file_base}error.txt",
+    }
+
+
 def build_ocr_trans_object_keys(rag_app_id: str, doc_dir: str, page_no: int) -> Dict[str, str]:
     """按翻译产物目录规则，计算某页翻译文本的对象 Key（最近一次写入）。"""
     rag_app_id = (rag_app_id or config.RAG_APP_ID).strip()
@@ -89,7 +107,7 @@ def load_ocr_page_assets(
     doc_dir: str,
     page_no: int,
 ) -> Dict[str, Any]:
-    """从 MinIO 读取某页的 png/text/table/log。读取不到则返回空。"""
+    """Load raw OCR page output from MinIO; missing objects become empty."""
     keys = build_ocr_object_keys(rag_app_id, doc_dir, page_no)
 
     def _safe_get_bytes(k: str) -> bytes:
@@ -109,8 +127,31 @@ def load_ocr_page_assets(
         "png_bytes": _safe_get_bytes(keys["img"]),
         "ocr_text": _safe_get_text(keys["text"]),
         "ocr_table": _safe_get_text(keys["tab"]),
-        "ocr_figure": _safe_get_text(keys.get("figure", "")) if keys.get("figure") else "",
+        "ocr_figure": _safe_get_text(keys["figure"]),
         "ocr_log": _safe_get_text(keys["log"]),
+    }
+
+
+def load_vlm_page_assets(
+    rag_app_id: str,
+    doc_dir: str,
+    page_no: int,
+) -> Dict[str, Any]:
+    """Load raw VLM page output from MinIO; missing objects become empty."""
+    keys = build_vlm_object_keys(rag_app_id, doc_dir, page_no)
+
+    def _safe_get_text(k: str) -> str:
+        try:
+            return obj_store.get_text(k)
+        except Exception:
+            return ""
+
+    return {
+        "object_keys": keys,
+        "vlm_text": _safe_get_text(keys["text"]),
+        "vlm_table": _safe_get_text(keys["tab"]),
+        "vlm_figure": _safe_get_text(keys["figure"]),
+        "vlm_error": _safe_get_text(keys["error"]),
     }
 
 
@@ -220,16 +261,45 @@ def ensure_system_message(messages: List[Dict[str, Any]]) -> None:
         messages.insert(0, {"role": "system", "content": config.SYSTEM_PROMPT})
 
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
+_CJK_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 
 
 def _detect_query_language(text: str) -> str:
-    """Return 'ar' for Arabic, 'en' for English, else 'auto'."""
-    if _ARABIC_RE.search(text or ""):
+    """Detect the supported language in the latest user question."""
+    text = text or ""
+    # Arabic and Chinese questions commonly contain Latin product names or
+    # abbreviations (AI/OCR/VLM). Those abbreviations must not switch the reply.
+    if _ARABIC_RE.search(text):
         return "ar"
-    if _LATIN_RE.search(text or ""):
+    if _CJK_RE.search(text):
+        return "zh"
+    if _LATIN_RE.search(text):
         return "en"
     return "auto"
+
+
+def _language_instruction(lang: str) -> Optional[str]:
+    if lang == "ar":
+        return (
+            "تعليمات إلزامية: أجب باللغة العربية فقط، وبأسلوب مناسب للكتابة "
+            "من اليمين إلى اليسار. لا تغيّر لغة الإجابة بسبب لغة السياق المسترجع."
+        )
+    if lang == "zh":
+        return "强制要求：仅使用中文回答，不要因检索上下文的语言而切换回答语言。"
+    if lang == "en":
+        return "Mandatory: answer only in English, regardless of the retrieved context language."
+    return None
+
+
+def _model_error_message(lang: str, error: Exception) -> str:
+    detail = f"{type(error).__name__}: {error}"
+    if lang == "ar":
+        return f"تعذر الاتصال بالنموذج: {detail}"
+    if lang == "en":
+        return f"Model call failed: {detail}"
+    # Chinese is also the safe default for this Chinese-first application.
+    return f"调用模型失败：{detail}"
 
 
 def build_user_content(
@@ -246,9 +316,11 @@ def build_user_content(
                 "text": "以下是从PDF中检索到的相关上下文，请优先基于此回答：\n\n" + pdf_context,
             }
         )
+    content.append({"type": "text", "text": text})
+    # Keep this after the actual question so retrieved content cannot become the
+    # model's most recent language cue.
     if lang_instruction:
         content.append({"type": "text", "text": lang_instruction})
-    content.append({"type": "text", "text": text})
     return content
 
 def _upload_text(
@@ -747,8 +819,9 @@ def ingest_pages_common(
     except Exception:
         source_uri = file_path  # 兜底
 
-    # 2) 写每页产物（沿用 ocr 目录，哪怕不是 OCR）
+    # 2) Write per-page parser outputs.
     page_texts: List[str] = []
+    processing_warnings: List[str] = []
 
     for page in pages:
         page_no = int(page.get("page_no", 0))
@@ -760,15 +833,44 @@ def ingest_pages_common(
         figures = (page.get("figures") or "").strip()
         png_bytes = page.get("png_bytes")
 
-        base = f"{rag_app_id}/{doc_dir}/ocr"
-        if text:
-            _upload_text(obj_store, f"{base}/text/{doc_dir}_page{page_no}.txt", text)
-        if tables:
-            _upload_text(obj_store, f"{base}/tab/{doc_dir}_page{page_no}table.txt", tables)
-        if figures:
-            _upload_text(obj_store, f"{base}/figure/{doc_dir}_page{page_no}figure.txt", figures)
+        has_multimodal_outputs = any(
+            key in page
+            for key in (
+                "ocr_text", "ocr_tables", "ocr_log",
+                "vlm_text", "vlm_tables", "vlm_figures", "vlm_error",
+            )
+        )
+        ocr_text = (page.get("ocr_text") or "").strip() if has_multimodal_outputs else text
+        ocr_tables = (page.get("ocr_tables") or "").strip() if has_multimodal_outputs else tables
+        ocr_log = (page.get("ocr_log") or "").strip()
+        vlm_text = (page.get("vlm_text") or "").strip()
+        vlm_tables = (page.get("vlm_tables") or "").strip()
+        vlm_figures = (page.get("vlm_figures") or "").strip()
+        vlm_error = (page.get("vlm_error") or "").strip()
+        if "[OCR FATAL]" in ocr_log or "[OCR] remote error" in ocr_log:
+            processing_warnings.append(f"page {page_no}: OCR failed: {ocr_log.splitlines()[-1]}")
+        if vlm_error:
+            processing_warnings.append(f"page {page_no}: {vlm_error}")
+
+        ocr_base = f"{rag_app_id}/{doc_dir}/ocr"
+        vlm_base = f"{rag_app_id}/{doc_dir}/vlm"
+        file_base = f"{doc_dir}_page{page_no}"
+        if ocr_text:
+            _upload_text(obj_store, f"{ocr_base}/text/{file_base}.txt", ocr_text)
+        if ocr_tables:
+            _upload_text(obj_store, f"{ocr_base}/tab/{file_base}table.txt", ocr_tables)
+        if ocr_log:
+            _upload_text(obj_store, f"{ocr_base}/log/{file_base}log.txt", ocr_log)
+        if vlm_text:
+            _upload_text(obj_store, f"{vlm_base}/text/{file_base}.txt", vlm_text)
+        if vlm_tables:
+            _upload_text(obj_store, f"{vlm_base}/tab/{file_base}table.txt", vlm_tables)
+        if vlm_figures:
+            _upload_text(obj_store, f"{vlm_base}/figure/{file_base}figure.txt", vlm_figures)
+        if vlm_error:
+            _upload_text(obj_store, f"{vlm_base}/error/{file_base}error.txt", vlm_error)
         if png_bytes:
-            _upload_image(obj_store, f"{base}/img/{doc_dir}_page{page_no}.png", png_bytes)
+            _upload_image(obj_store, f"{ocr_base}/img/{file_base}.png", png_bytes)
 
         parts = []
         if text:
@@ -781,6 +883,8 @@ def ingest_pages_common(
         page_texts.append(f"[page {page_no}]\n" + "\n\n".join(parts))
 
     full_text = "\n\n".join(page_texts).strip()
+    if pages and not full_text and processing_warnings:
+        raise RuntimeError("Document parsing produced no content: " + "; ".join(processing_warnings))
 
     # 3) 写整本文本
     if full_text:
@@ -804,26 +908,43 @@ def ingest_pages_common(
     )
 
     chunk_rows = []
-    for i, ch in enumerate(chunks):
-        chunk_rows.append((i, ch, embed_text(ch)))
+    embedding_error: Optional[str] = None
+    try:
+        for i, ch in enumerate(chunks):
+            chunk_rows.append((i, ch, embed_text(ch)))
+    except Exception as e:
+        embedding_error = f"{type(e).__name__}: {e}"
+        chunk_rows = []
+        processing_warnings.append(
+            "OCR/VLM outputs were saved, but vectorization and database ingestion "
+            f"were skipped because the embedding service is unavailable: {embedding_error}"
+        )
      
     parserlist = ""
     parserlist = "|".join(parser_ver)
 
-    try:
-        doc_id = pg_store.ingest_pdf(
-            ctx=ctx,
-            title=p.name,
-            source_uri=source_uri,
-            classification=classification,
-            parser_ver=parserlist,
-            embed_model=config.EMBED_MODEL,
-            chunks=chunk_rows,
-        )  
-        db_msg = f"Written in DB, doc_id={doc_id}"
-    except Exception as e:
-        db_msg = f"Fail to write in DB：{type(e).__name__}: {e}"
+    if embedding_error:
+        db_msg = (
+            "Skipped DB ingestion: OCR/VLM results are saved in MinIO, but the "
+            f"embedding service is unavailable ({embedding_error})"
+        )
         doc_id = None
+    else:
+        try:
+            doc_id = pg_store.ingest_pdf(
+                ctx=ctx,
+                title=p.name,
+                source_uri=source_uri,
+                classification=classification,
+                parser_ver=parserlist,
+                embed_model=config.EMBED_MODEL,
+                chunks=chunk_rows,
+            )
+            db_msg = f"Written in DB, doc_id={doc_id}"
+        except Exception as e:
+            db_msg = f"Fail to write in DB：{type(e).__name__}: {e}"
+            processing_warnings.append(db_msg)
+            doc_id = None
 
     # 5) Graph build (optional)
     if doc_id and graph_enabled:
@@ -901,7 +1022,8 @@ def ingest_pages_common(
         "source_uri": source_uri,
         "pages": len(page_texts),
         "pdf_chars": len(full_text or ""),
-        "chunks": len(chunk_rows),
+        "chunks": len(chunks),
+        "processing_warnings": processing_warnings,
     }
 
 
@@ -1025,12 +1147,7 @@ def chat_send(
 
     # 3) LLM
     lang = _detect_query_language(user_text)
-    if lang == "ar":
-        lang_instruction = "Please answer in Arabic and use right-to-left writing."
-    elif lang == "en":
-        lang_instruction = "Please answer in English."
-    else:
-        lang_instruction = None
+    lang_instruction = _language_instruction(lang)
 
     ensure_system_message(state.api_messages)
     state.api_messages.append(
@@ -1043,7 +1160,7 @@ def chat_send(
     try:
         assistant_text = call_vllm_chat(state.api_messages)
     except Exception as e:
-        assistant_text = f"调用模型失败：{type(e).__name__}: {e}"
+        assistant_text = _model_error_message(lang, e)
 
     state.api_messages.append({"role": "assistant", "content": assistant_text})
     state.ui_messages.append({"role": "user", "content": user_text})

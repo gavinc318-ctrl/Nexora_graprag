@@ -124,6 +124,7 @@ def ui_load_page(
     str,     # ocr_table_trans
     str,     # ocr_figure_trans
     str,     # ocr_log
+    str,     # vlm_output
     Any,     # doc_pick update
     Dict[str, Any],  # doc_state
     Any,     # chunk_sel update
@@ -155,6 +156,7 @@ def ui_load_page(
 
     # 1) MinIO 拉页面产物（与 doc_id 无关）
     assets = core.load_ocr_page_assets(app_id, doc_dir, page_no)
+    vlm_assets = core.load_vlm_page_assets(app_id, doc_dir, page_no)
     trans_assets = core.load_ocr_page_trans_assets(app_id, doc_dir, page_no)
     img = _png_bytes_to_pil(assets.get("png_bytes", b""))
     ocr_text = _format_md_for_display(assets.get("ocr_text", "") or "")
@@ -164,10 +166,32 @@ def ui_load_page(
     ocr_table_trans = _format_md_for_display(trans_assets.get("table_trans", "") or "")
     ocr_figure_trans = _format_md_for_display(trans_assets.get("figure_trans", "") or "")
     ocr_log = assets.get("ocr_log", "") or ""
+    vlm_parts = []
+    if vlm_assets.get("vlm_text"):
+        vlm_parts.append("TEXT\n" + vlm_assets["vlm_text"])
+    if vlm_assets.get("vlm_table"):
+        vlm_parts.append("TABLES\n" + vlm_assets["vlm_table"])
+    if vlm_assets.get("vlm_figure"):
+        vlm_parts.append("FIGURES\n" + vlm_assets["vlm_figure"])
+    if vlm_assets.get("vlm_error"):
+        vlm_parts.append("ERROR\n" + vlm_assets["vlm_error"])
+    vlm_output = _format_md_for_display("\n\n".join(vlm_parts))
 
     # 2) PG 查 doc 候选（可能多个）
     ctx = core.RlsContext(app_id=app_id, clearance=clearance, request_id=str(uuid.uuid4()))
-    docs = core.pg_store.find_docs_by_doc_dir(ctx=ctx, doc_dir=doc_dir, limit=20)
+    try:
+        docs = core.pg_store.find_docs_by_doc_dir(ctx=ctx, doc_dir=doc_dir, limit=20)
+    except Exception as e:
+        status = (
+            f"⚠️ 已尝试加载 MinIO 页面产物，但 PostgreSQL 查询失败："
+            f"{type(e).__name__}: {e}"
+        )
+        return (
+            img, ocr_text, ocr_table, ocr_figure,
+            ocr_text_trans, ocr_table_trans, ocr_figure_trans, ocr_log,
+            vlm_output, gr.update(choices=[], value=None), {},
+            gr.update(choices=[], value=None), {}, status,
+        )
     doc_choices = _make_doc_choices(docs)
 
     if not docs:
@@ -177,7 +201,7 @@ def ui_load_page(
         )
         return (
             img, ocr_text, ocr_table, ocr_figure, ocr_text_trans, ocr_table_trans, ocr_figure_trans, ocr_log,
-            gr.update(choices=[], value=None),
+            vlm_output, gr.update(choices=[], value=None),
             {},
             gr.update(choices=[], value=None),
             {},
@@ -196,7 +220,7 @@ def ui_load_page(
         )
         return (
             img, ocr_text, ocr_table, ocr_figure, ocr_text_trans, ocr_table_trans, ocr_figure_trans, ocr_log,
-            gr.update(choices=doc_choices, value=doc_id),
+            vlm_output, gr.update(choices=doc_choices, value=doc_id),
             doc_state,
             gr.update(choices=chunk_choices, value=(chunk_choices[0][1] if chunk_choices else None)),
             chunks_state,
@@ -210,7 +234,7 @@ def ui_load_page(
     )
     return (
         img, ocr_text, ocr_table, ocr_figure, ocr_text_trans, ocr_table_trans, ocr_figure_trans, ocr_log,
-        gr.update(choices=doc_choices, value=None),
+        vlm_output, gr.update(choices=doc_choices, value=None),
         {},
         gr.update(choices=[], value=None),
         {},
@@ -497,12 +521,15 @@ def build_app() -> gr.Blocks:
         with gr.Row():
             img = gr.Image(label="Page Image（MinIO）", height=600)
             with gr.Column():
-                gr.Markdown("**Text（MinIO）**")
+                gr.Markdown("**OCR Text（MinIO）**")
                 ocr_text = gr.Markdown(elem_id="ocr_text_html", sanitize_html=False, max_height=240)
-                gr.Markdown("**Table（MinIO）**")
+                gr.Markdown("**OCR Table（MinIO）**")
                 ocr_table = gr.Markdown(elem_id="ocr_table_html", sanitize_html=False, max_height=240)
-                gr.Markdown("**Figure（MinIO）**")
+                gr.Markdown("**Legacy Figure（MinIO）**")
                 ocr_figure = gr.Markdown(elem_id="ocr_figure_html", sanitize_html=False, max_height=240)
+            with gr.Column():
+                gr.Markdown("**VLM Output（MinIO）**")
+                vlm_output = gr.Markdown(elem_id="vlm_output_html", sanitize_html=False, max_height=600)
             with gr.Column():
                 gr.Markdown("**Text（Translated）**")
                 ocr_text_trans = gr.Markdown(elem_id="ocr_text_trans_html", sanitize_html=False, max_height=240)
@@ -537,6 +564,7 @@ def build_app() -> gr.Blocks:
                 ocr_table_trans,
                 ocr_figure_trans,
                 ocr_log,
+                vlm_output,
                 doc_pick,
                 doc_state,
                 chunk_sel,
@@ -627,7 +655,7 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7861,
         css=(
-            "#ocr_text_html, #ocr_table_html, #ocr_figure_html, "
+            "#ocr_text_html, #ocr_table_html, #ocr_figure_html, #vlm_output_html, "
             "#ocr_text_trans_html, #ocr_table_trans_html, #ocr_figure_trans_html {"
             "border: 1px solid var(--border-color-primary, #333);"
             "padding: 8px;"

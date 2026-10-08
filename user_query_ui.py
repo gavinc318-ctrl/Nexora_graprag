@@ -30,10 +30,6 @@ from core import AppState, chat_send, parse_page_from_meta, load_ocr_page_assets
 
 _DOC_DIR_RE = re.compile(r"(?:^|/)(?P<app>[^/]+)/(?P<docdir>[^/]+)/", re.IGNORECASE)
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
-_RTL_START = "\u202B"
-_RTL_END = "\u202C"
-
-
 def _parse_doc_dir_from_source_uri(source_uri: str, rag_app_id: str) -> Optional[str]:
     """Best-effort: extract <doc_dir> from a MinIO-like URI/path.
 
@@ -76,8 +72,11 @@ def _is_arabic_text(text: str) -> bool:
 def _wrap_rtl(text: str) -> str:
     if not text:
         return text
-    # Force RTL direction and right alignment for Arabic replies in Chatbot.
-    return f'<div dir="rtl" style="text-align:right">{text}</div>'
+    return (
+        '<div dir="rtl" lang="ar" '
+        'style="direction:rtl;text-align:right;unicode-bidi:plaintext">'
+        f'{text}</div>'
+    )
 
 
 def _format_ui_messages_for_display(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -87,7 +86,7 @@ def _format_ui_messages_for_display(messages: List[Dict[str, str]]) -> List[Dict
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content") or ""
-        if role == "assistant" and _is_arabic_text(content):
+        if role in {"user", "assistant"} and _is_arabic_text(content):
             content = _wrap_rtl(content)
         formatted.append({"role": role, "content": content})
     return formatted

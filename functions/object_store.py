@@ -22,13 +22,18 @@ class ObjectStore:
         )
         self.bucket = os.getenv("MINIO_BUCKET", "rag-files")
 
+        self.init_error: Optional[str] = None
         try:
             if not self.client.bucket_exists(self.bucket):
                 self.client.make_bucket(self.bucket)
         except S3Error as e:
-            # 并发启动时可能出现 bucket 已创建，忽略即可
+            # Concurrent startup may race while creating the bucket.
             if getattr(e, "code", "") not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
-                raise
+                self.init_error = f"{type(e).__name__}: {e}"
+        except Exception as e:
+            # Keep UI/API imports available when MinIO is temporarily down.
+            # Real reads/writes still raise and are surfaced by their callers.
+            self.init_error = f"{type(e).__name__}: {e}"
 
     # -------------------------
     # Write

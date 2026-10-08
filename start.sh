@@ -11,6 +11,10 @@ PY="$NEXORA_ENV/bin/python"
 export LD_LIBRARY_PATH="$NEXORA_ENV/lib:${LD_LIBRARY_PATH:-}"
 export DISABLE_MODEL_SOURCE_CHECK=True
 
+# /tmp/gradio 属于上一位开发者、本账户不可写，须指向自有可写目录
+export GRADIO_TEMP_DIR="${GRADIO_TEMP_DIR:-$HOME/opt/gradio-tmp}"
+mkdir -p "$GRADIO_TEMP_DIR"
+
 trap 'kill 0' SIGINT SIGTERM
 
 "$PY" -m uvicorn api_server:app --host 0.0.0.0 --port 19000 &   # API

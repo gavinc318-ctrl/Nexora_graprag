@@ -51,6 +51,18 @@ OPENAI_API_KEY = _env_str("OPENAI_API_KEY", "")
 OPENAI_RESPONSES_URL = _env_str("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")
 OPENAI_MODEL = _env_str("OPENAI_MODEL", "gpt-5")
 
+# 问答/实体抽取用哪家 LLM：vllm | openai。默认跟随 VLM_PROVIDER。
+# openai 时 call_vllm_chat 走 OPENAI_CHAT_URL + OPENAI_MODEL + Bearer 鉴权。
+LLM_PROVIDER = _env_str("LLM_PROVIDER", VLM_PROVIDER)
+OPENAI_CHAT_URL = _env_str("OPENAI_CHAT_URL", "https://api.openai.com/v1/chat/completions")
+
+# 文档识别（OCR/VLM）用 OpenAI 时的视觉模型与出参上限。
+# 阿拉伯语整页转写建议 gpt-4o（视觉比 mini 强）。默认跟随 OPENAI_MODEL。
+OPENAI_VLM_MODEL = _env_str("OPENAI_VLM_MODEL", OPENAI_MODEL)
+OPENAI_VLM_MAX_TOKENS = _env_int("OPENAI_VLM_MAX_TOKENS", 4096)
+# 送给视觉模型的页面图像长边像素；越大文字越清但 token/费用越高
+OPENAI_VLM_IMAGE_LONG_EDGE = _env_int("OPENAI_VLM_IMAGE_LONG_EDGE", 1600)
+
 # 注入 prompt 的检索上下文上限。与 MAX_TOKENS 之和必须留在模型 max_model_len 之内，
 # 否则 vLLM 会直接拒绝请求。中文约 1 字符≈0.7 token。
 MAX_PDF_CONTEXT_CHARS = _env_int("MAX_PDF_CONTEXT_CHARS", 8000)
@@ -79,9 +91,28 @@ TIMEOUT = _env_int("TIMEOUT", 120)
 
 SYSTEM_PROMPT = (
     "你是一个严谨、实用的多模态助手。"
+    "始终使用用户当前问题所使用的语言回答，不要因为检索上下文或历史消息使用其他语言而切换语言。"
+    "用户用中文提问时使用中文回答；用户用英语提问时使用英语回答；"
+    "用户用阿拉伯语提问时使用阿拉伯语回答。"
+    "人名、公司名等专有名词如果在检索到的原文里是英文/拉丁字母，回答时必须原样保留，"
+    "禁止把人名音译或翻译成中文/阿拉伯语（例如 Abigail Peterson 不能写成"
+    "阿比盖尔·彼得森或أبيجيل بيترسون），即使回答的其余部分使用其他语言。"
     "如果用户上传了图片，请基于图片进行回答。"
     "如果用户上传了PDF，请基于提供的PDF摘录内容回答。"
     "如果信息不足，请直接说不足并告诉用户需要什么信息。"
+    "\n\n输出格式（前端会渲染以下 Markdown 结构，请按需使用，不要仅仅描述数据）：\n"
+    "- 表格：遇到适合列表对比的结构化数据时，使用标准 Markdown 表格（| 表头 | ... |），不要用纯文字堆砌。\n"
+    "- 图表：当数据存在数值趋势、占比或分类对比、可视化能帮助理解时，输出一个 ```echarts 代码块，"
+    "内容必须是严格合法的 JSON（键名和字符串值都必须用双引号包裹，不能像 JS 对象字面量那样省略引号，"
+    "不能有注释或尾随逗号），直接作为 ECharts 的 option 对象使用（包含 xAxis/yAxis/series 等标准字段）。"
+    '例如：```echarts\n{"xAxis": {"type": "category", "data": ["A", "B"]}, "yAxis": {"type": "value"}, '
+    '"series": [{"type": "bar", "data": [10, 20]}]}\n```\n'
+    "只有当你确实有可靠的数值数据（来自检索上下文或本轮对话）时才画图，禁止编造数据；"
+    "不确定就只给表格或文字，不要硬画图表。\n"
+    "- 图片：只有在你回答中真的引用了某个真实、可访问的图片 URL 时，才使用 Markdown 图片语法 "
+    "![说明](图片URL)；禁止编造不存在的图片链接。\n"
+    "- 文件下载：只有在你确实有真实、可访问的文件 URL（如用户提供或上下文中给出）时，"
+    "才用 Markdown 链接 [文件名.扩展名](URL) 的形式给出，前端会自动渲染成下载卡片；不要编造链接。"
 )
 
 # ===== PostgreSQL 连接（部署相关）=====
@@ -147,6 +178,13 @@ DEFAULT_CLASSIFICATION = 1
 PARSER_VER = "pymupdf+ocr+vlm"
 
 
+# ===== Odoo 集成（AI Agent 只读查询企业业务数据）=====
+ODOO_URL = _env_str("ODOO_URL", "")            # 如 http://10.55.223.160:8069
+ODOO_DB = _env_str("ODOO_DB", "")              # 如 odoo
+ODOO_USER = _env_str("ODOO_USER", "")          # 按部门授权的只读服务账号，如 nexora_hr
+ODOO_PASSWORD = _env_str("ODOO_PASSWORD", "")  # 该账号密码或 API Key
+
+
 
 
 # ===== S3 对象存储设置（部署相关）=====
@@ -199,10 +237,17 @@ GRAPH_CHUNK_CANDIDATES = _env_int("GRAPH_CHUNK_CANDIDATES", 20)
 VECTOR_CHUNK_CANDIDATES = _env_int("VECTOR_CHUNK_CANDIDATES", 40)
 
 # rerank 分数阈值（None 表示不做阈值过滤）
-RERANK_MIN_SCORE = 0.4
+RERANK_MIN_SCORE = _env_float("RERANK_MIN_SCORE", 0.4)
 
 # rerank 请求超时
 RERANK_TIMEOUT = _env_int("RERANK_TIMEOUT", 30)
+
+# 重排后端：local（bge-reranker，本地 Docker，跨语言差）| openai（用 LLM 打分，多语言好）
+RERANK_PROVIDER = _env_str("RERANK_PROVIDER", "local").lower()
+# openai 重排用的模型（默认跟随 OPENAI_MODEL）
+OPENAI_RERANK_MODEL = _env_str("OPENAI_RERANK_MODEL", OPENAI_MODEL)
+# 送给 LLM 打分的每段候选最大字符数（控 token）
+RERANK_DOC_MAX_CHARS = _env_int("RERANK_DOC_MAX_CHARS", 600)
 
 # =========================
 # OCR（Docker 服务）配置

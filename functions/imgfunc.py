@@ -113,58 +113,56 @@ def parse_image_to_pages(
     max_tables = int(getattr(config, "OCR_MAX_TABLES", 3) or 3)
     combined_hint_parts: List[str] = []
     ocr_text = ""
-    ocr_tables = []
+    ocr_tables: List[Dict[str, Any]] = []
+    ocr_logs = ""
+    ocr_table_md = ""
     if use_ocr:
-        # ---- OCR 远程调用 ----
         ocr_text, ocr_tables, ocr_logs = paddle_ocr_from_png_bytes(
             png_bytes=png_bytes,
             lang=ocr_lang,
-            max_tables=max_tables
+            max_tables=max_tables,
         )
-        ocr_text_hint = ocr_text or ""
-        table_blob=tables_to_block(ocr_tables)
-
-        # ✅ 仅在 OCR 模式下追加：OCR 文本 
-        if ocr_text_hint.strip():
-            combined_hint_parts.append("OCR Text:\n" + ocr_text_hint.strip())
-
-        
-        # 仅在ocr模式下追加OCR表格
-        if table_hint_md := (table_blob or "").strip():
-            combined_hint_parts.append("Tables:\n" + table_hint_md.strip())
-
+        ocr_text = (ocr_text or "").strip()
+        ocr_table_md = _tables_to_markdown(ocr_tables)
+        table_blob = tables_to_block(ocr_tables)
+        if ocr_text:
+            combined_hint_parts.append("OCR Text:\n" + ocr_text)
+        if table_blob.strip():
+            combined_hint_parts.append("OCR Tables:\n" + table_blob.strip())
 
     text_hint = "\n\n".join(combined_hint_parts).strip()
     if len(text_hint) > 4000:
         text_hint = text_hint[:4000] + "\n...(text hint truncated)"
 
-    if use_vlm or not use_ocr:
-        vlm_text = ""
-        vlm_tables = ""
-        vlm_figures = ""
-
+    vlm_text = ""
+    vlm_tables = ""
+    vlm_figures = ""
+    vlm_error = ""
+    if use_vlm:
         page_png_data_url = _png_bytes_to_data_url(png_bytes)
         vlm_payload = vlm_page_to_rag_jason(
             page_png_data_url=page_png_data_url,
-            page_no = 1,
-            lang = ocr_lang,
-            text_hint=text_hint if text_hint else None,
+            page_no=1,
+            lang=ocr_lang,
+            text_hint=text_hint or None,
         )
         vlm_text = (vlm_payload.get("text") or "").strip()
         vlm_tables = vlm_tables_to_markdown(vlm_payload.get("tables") or [])
         vlm_figures = vlm_figures_to_markdown(vlm_payload.get("figures") or [])
-        page = {
-            "page_no": 1,
-            "text": vlm_text,
-            "tables": vlm_tables,
-            "figures": vlm_figures,
-            "png_bytes": png_bytes,
-        }
-    else:
-        page = {
-            "page_no": 1,       
-            "text": (ocr_text or "").strip(),
-            "tables": _tables_to_markdown(ocr_tables),
-            "png_bytes": png_bytes,        
-        } 
+        vlm_error = (vlm_payload.get("error") or "").strip()
+
+    page = {
+        "page_no": 1,
+        "text": vlm_text or ocr_text,
+        "tables": vlm_tables or ocr_table_md,
+        "figures": vlm_figures,
+        "png_bytes": png_bytes,
+        "ocr_text": ocr_text,
+        "ocr_tables": ocr_table_md,
+        "ocr_log": ocr_logs,
+        "vlm_text": vlm_text,
+        "vlm_tables": vlm_tables,
+        "vlm_figures": vlm_figures,
+        "vlm_error": vlm_error,
+    }
     return [page]

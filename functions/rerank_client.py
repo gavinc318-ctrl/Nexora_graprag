@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,11 @@ def ensure_rerank_service() -> None:
     - 如果没在跑：按 config.RERANK_AUTO_START 拉起 docker compose
     """
     if not getattr(config, "RERANK_ENABLED", False):
+        return
+
+    # OpenAI 打分重排不依赖本地 Docker 服务
+    if getattr(config, "RERANK_PROVIDER", "local") == "openai":
+        print("[rerank] provider=openai (LLM scoring, no local service needed).")
         return
 
     if _is_rerank_alive():
@@ -64,10 +70,14 @@ def ensure_rerank_service() -> None:
 
 def rerank_results(query: str, docs: List[str], top_k: int) -> List[Dict[str, Any]]:
     """
-    返回 rerank 服务的结果：results=[{doc, score, rank}, ...]
+    返回 rerank 结果：results=[{doc, score, rank}, ...]
+    provider=openai 时用 LLM 打分（跨语言好）；否则走本地 bge-reranker 服务。
     """
     if not docs:
         return []
+    if getattr(config, "RERANK_PROVIDER", "local") == "openai":
+        return _rerank_results_openai(query, docs, top_k)
+
     payload = {"query": query, "documents": docs, "top_k": top_k}
     r = requests.post(
         config.RERANK_API_URL,
@@ -77,6 +87,69 @@ def rerank_results(query: str, docs: List[str], top_k: int) -> List[Dict[str, An
     r.raise_for_status()
     data = r.json()
     return data.get("results") or []
+
+
+def _rerank_results_openai(query: str, docs: List[str], top_k: int) -> List[Dict[str, Any]]:
+    """
+    用 OpenAI Chat Completions 给每段候选打 0.0–1.0 相关性分。
+    评分标准写进 prompt，使 RERANK_MIN_SCORE 阈值有明确含义。
+    任何异常都退化为「原序、score=None」——不清空候选，避免问答彻底丢上下文。
+    """
+    max_chars = int(getattr(config, "RERANK_DOC_MAX_CHARS", 600))
+    passages = [(d or "")[:max_chars].replace("\n", " ").strip() for d in docs]
+
+    listing = "\n".join(f"[{i}] {p}" for i, p in enumerate(passages))
+    sys_prompt = (
+        "You are a multilingual search-relevance judge. The query and passages may be in "
+        "different languages (e.g. English query, Arabic passage) — judge by meaning, not language.\n"
+        "Score every passage 0.0–1.0 for how well it helps answer the query:\n"
+        "  1.0 = directly contains the answer;  0.5 = related/partial;  0.0 = unrelated.\n"
+        'Return ONLY JSON: {"scores":[{"i":<index>,"score":<float>}, ...]} covering every index.'
+    )
+    user_prompt = f"Query: {query}\n\nPassages:\n{listing}"
+
+    payload = {
+        "model": getattr(config, "OPENAI_RERANK_MODEL", config.OPENAI_MODEL),
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
+
+    try:
+        r = requests.post(
+            config.OPENAI_CHAT_URL,
+            json=payload,
+            headers=headers,
+            timeout=getattr(config, "RERANK_TIMEOUT", 30),
+        )
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"] or "{}"
+        rows = json.loads(content).get("scores") or []
+        by_idx: Dict[int, float] = {}
+        for row in rows:
+            try:
+                by_idx[int(row["i"])] = float(row["score"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not by_idx:
+            raise ValueError("no usable scores in LLM response")
+    except Exception as e:
+        print(f"[rerank] openai scoring failed, passthrough: {type(e).__name__}: {e}")
+        return [{"doc": d, "score": None, "rank": i + 1} for i, d in enumerate(docs)]
+
+    ranked = sorted(
+        range(len(docs)),
+        key=lambda i: by_idx.get(i, 0.0),
+        reverse=True,
+    )[: max(top_k, 0) or len(docs)]
+    return [
+        {"doc": docs[i], "score": by_idx.get(i, 0.0), "rank": r + 1}
+        for r, i in enumerate(ranked)
+    ]
 
 
 def rerank(query: str, docs: List[str], top_k: int) -> List[int]:
